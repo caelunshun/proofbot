@@ -1,0 +1,15 @@
+Updating lemma `{{ lemma_name }}` failed.
+
+Reason: {{ failure_reason }}.
+
+Updating proof failed.
+
+Reason: {{ failure_reason }}
+
+For reference, these were the file contents after applying your proposed change.
+
+```lean
+{{ failed_file_contents }}
+```
+However, because the compilation failed, your lemma code has now been automatically reverted,
+so the file is now in the state it was before your update_lemma call.

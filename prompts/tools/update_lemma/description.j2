@@ -1,0 +1,9 @@
+Creates or updates a lemma as part of your proof. Lemmas are keyed by name,
+so you can make multiple lemmas as needed. The name of the lemma in the provided
+code must match the provided `name` field. The lemma must be a complete
+Lean `theorem` statement and proof. It will be inserted directly above the theorem in the source file.
+Use this whenever you need additional components/sub-theorems to complete the proof.
+You can only update lemmas you created; attempting to overwrite a pre-existing lemma
+will fail. The provided code will completely overwrite any existing code for that lemma.
+Any use of `sorry` will be rejected. Provide an empty `code` string to delete a lemma you created,
+which you should do whenever you find a lemma was unnecessary to complete the proof.

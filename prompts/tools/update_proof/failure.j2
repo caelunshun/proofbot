@@ -1,0 +1,12 @@
+Updating proof failed.
+
+Reason: {{ failure_reason }}
+
+For reference, these were the file contents after applying your proposed change.
+
+```lean
+{{ failed_file_contents }}
+```
+
+However, because the compilation failed, your proof code has now been reverted automatically,
+so the file is now in the state it was before your update_proof call.
