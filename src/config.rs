@@ -43,5 +43,8 @@ pub struct Model {
     pub provider: String,
     pub api_name: String,
     pub max_output_tokens: u32,
-    pub reasoning_levels: Vec<ReasoningEffort>,
+    pub reasoning_level: String,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<u32>,
 }

@@ -12,8 +12,9 @@ pub fn query_theorem_body_byte_range(
 ) -> Option<Range<usize>> {
     let theorem_start = query_theorem_start(file_contents, theorem_name)?;
     let sorry = file_contents[theorem_start..].find("sorry")? + theorem_start;
+    let start_of_sorry_line = file_contents[..sorry].rfind("\n")? + 1;
     Some(Range {
-        start: sorry,
+        start: start_of_sorry_line,
         end: sorry + "sorry".len(),
     })
 }

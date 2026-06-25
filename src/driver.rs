@@ -92,11 +92,18 @@ pub fn run_driver(config: &Config, args: &Args) -> anyhow::Result<()> {
             max_completion_tokens: Some(model.max_output_tokens),
             tools: Some(tools.clone()),
             parallel_tool_calls: Some(true),
+            temperature: model.temperature.map(|x| x as f32),
+            top_p: model.top_p.map(|x| x as f32),
             ..Default::default()
         };
         let mut request = serde_json::to_value(request)?;
         request["messages"] = serde_json::to_value(messages)?;
         request["stream"] = serde_json::Value::Bool(true);
+
+        if let Some(top_k) = model.top_k {
+            request["top_k"] = serde_json::Value::from(top_k);
+        }
+
         Ok(request)
     };
 

@@ -1,11 +1,8 @@
 Use this tool to replace the `sorry` in the provided theorem with a potential proof.
-The provided `proof_code` will replace the `sorry`, so should not contain the surrounding theorem
+The provided `proof_code` will replace the line containing `sorry`, so should not contain the surrounding theorem
 statement (it's read-only). It must be valid Lean 4 syntax. It cannot contain `sorry`; this will
 be rejected. The tool will respond with the result of compiling the proof. If successful, then you may
 finalize your response by returning the `theorem_proven` status. If unsuccessful, you can try again.
 Note that each call to `update_proof` will completely replace the code provided in any previous
 `update_proof`. Lemmas are unaffected.
 
-In the provided `proof_code`, the first line should be unindented, and subsequent
-lines should be indented the same amount as the `sorry` in the original file
-(plus any extra nesting you need).
