@@ -1550,6 +1550,7 @@ dependencies = [
  "colored",
  "directories 6.0.0",
  "fs_extra",
+ "futures",
  "include_dir",
  "minijinja",
  "pollster",

@@ -5,7 +5,7 @@ pub fn check_lean_file(
     project_root: &Path,
 ) -> anyhow::Result<LeanCheckResult> {
     let output = Command::new("lake")
-        .args(["env", "lean", relative_path])
+        .args(["lean", relative_path])
         .current_dir(project_root)
         .output()?;
 

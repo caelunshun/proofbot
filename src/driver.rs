@@ -1,7 +1,7 @@
 use crate::{
     checker::LeanCheckResult,
     config::Config,
-    context::{Context, display_relative_path},
+    context::{Context, display_relative_path, render_with_line_numbers},
     templates::{
         TemplateEngine, add_import, read_file, recall_directory_structure, system_prompt,
         update_lemma, update_proof, user_prompt, write_scratch_file,
@@ -9,16 +9,18 @@ use crate::{
 };
 use anyhow::{Context as _, bail, ensure};
 use async_openai::types::chat::{
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk,
     ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessage,
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
     ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-    ChatCompletionResponseMessage, ChatCompletionTool, ChatCompletionTools,
-    CreateChatCompletionRequest, FunctionObject, ReasoningEffort,
+    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent, ChatCompletionTool,
+    ChatCompletionTools, CreateChatCompletionRequest, FunctionCall, FunctionObject,
+    ReasoningEffort,
 };
 use clap::Parser;
 use colored::Colorize;
+use futures::StreamExt;
 use pollster::FutureExt;
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
@@ -94,6 +96,7 @@ pub fn run_driver(config: &Config, args: &Args) -> anyhow::Result<()> {
         };
         let mut request = serde_json::to_value(request)?;
         request["messages"] = serde_json::to_value(messages)?;
+        request["stream"] = serde_json::Value::Bool(true);
         Ok(request)
     };
 
@@ -136,41 +139,92 @@ pub fn run_driver(config: &Config, args: &Args) -> anyhow::Result<()> {
     let mut output_printer = LlmOutputPrinter::default();
 
     while !context.theorem_file_editor_mut().has_theorem_proof() {
-        let completion: ReasoningChatCompletionResponse =
-            api.create_byot(build_request(&messages)?).block_on()?;
+        // Stream the response, pushing reasoning and message content into the printer as soon as
+        // each chunk arrives. The accumulated message is reconstructed from the deltas so it can be
+        // appended to the history and its tool calls executed once the turn ends.
+        let mut stream = api
+            .create_stream_byot::<_, ReasoningChatCompletionChunk>(build_request(&messages)?)
+            .block_on()?;
 
-        ensure!(completion.choices.len() == 1);
+        let mut content = String::new();
+        let mut reasoning_content = String::new();
+        let mut refused = false;
+        let mut tool_calls: Vec<ToolCallAccumulator> = Vec::new();
 
-        let ReasoningResponseMessage {
-            message: response,
-            reasoning_content,
-        } = completion.choices.into_iter().next().unwrap().message;
+        while let Some(chunk) = stream.next().block_on() {
+            let chunk = chunk?;
+            let Some(choice) = chunk.choices.into_iter().next() else {
+                // skip empty chunks
+                continue;
+            };
+            let delta = choice.delta;
 
-        ensure!(response.refusal.is_none());
+            if delta.refusal.is_some() {
+                refused = true;
+            }
+            if let Some(reasoning) = &delta.reasoning_content {
+                reasoning_content.push_str(reasoning);
+                output_printer.push(reasoning);
+            }
+            if let Some(chunk_content) = &delta.content {
+                content.push_str(chunk_content);
+                output_printer.push(chunk_content);
+            }
+            for tool_call_chunk in delta.tool_calls.into_iter().flatten() {
+                let index = tool_call_chunk.index as usize;
+                if index >= tool_calls.len() {
+                    tool_calls.resize_with(index + 1, ToolCallAccumulator::default);
+                }
+                let accumulator = &mut tool_calls[index];
+                if let Some(id) = tool_call_chunk.id {
+                    accumulator.id.push_str(&id);
+                }
+                if let Some(function) = tool_call_chunk.function {
+                    if let Some(name) = function.name {
+                        accumulator.name.push_str(&name);
+                    }
+                    if let Some(arguments) = function.arguments {
+                        accumulator.arguments.push_str(&arguments);
+                    }
+                }
 
-        if let Some(reasoning_content) = &reasoning_content {
-            output_printer.push(reasoning_content);
+                output_printer.flush();
+            }
         }
-        if let Some(content) = &response.content {
-            output_printer.push(content);
-        }
 
+        // Turn over.
         output_printer.flush();
+
+        ensure!(!refused);
+
+        let tool_calls: Vec<ChatCompletionMessageToolCalls> = tool_calls
+            .into_iter()
+            .map(|accumulator| {
+                ChatCompletionMessageToolCalls::Function(ChatCompletionMessageToolCall {
+                    id: accumulator.id,
+                    function: FunctionCall {
+                        name: accumulator.name,
+                        arguments: accumulator.arguments,
+                    },
+                })
+            })
+            .collect();
+
+        let reasoning_content = (!reasoning_content.is_empty()).then_some(reasoning_content);
 
         messages.push(HistoryMessage::Assistant(AssistantHistoryMessage {
             role: AssistantRole::Assistant,
             message: ChatCompletionRequestAssistantMessage {
-                content: response
-                    .content
-                    .clone()
+                content: (!content.is_empty())
+                    .then_some(content)
                     .map(ChatCompletionRequestAssistantMessageContent::Text),
-                tool_calls: response.tool_calls.clone(),
+                tool_calls: (!tool_calls.is_empty()).then(|| tool_calls.clone()),
                 ..Default::default()
             },
             reasoning_content,
         }));
 
-        for tool_call in response.tool_calls.as_deref().unwrap_or_default() {
+        for tool_call in &tool_calls {
             let ChatCompletionMessageToolCalls::Function(tool_call) = tool_call else {
                 bail!("wrong custom tool call received from api")
             };
@@ -258,7 +312,7 @@ pub fn run_driver(config: &Config, args: &Args) -> anyhow::Result<()> {
                                     failure_reason: format!(
                                         "lean compile failed with errors: {output}"
                                     ),
-                                    failed_file_contents: source_code,
+                                    failed_file_contents: render_with_line_numbers(&source_code),
                                 },
                             )
                         }
@@ -283,13 +337,14 @@ pub fn run_driver(config: &Config, args: &Args) -> anyhow::Result<()> {
                             source_code,
                         } => {
                             tracing::info!("Proof failed to check");
+                            println!("{}", render_with_line_numbers(&source_code));
                             template_engine.render(
                                 "tools/update_proof/failure.j2",
                                 update_proof::FailureData {
                                     failure_reason: format!(
                                         "lean compile failed with errors: {output}"
                                     ),
-                                    failed_file_contents: source_code,
+                                    failed_file_contents: render_with_line_numbers(&source_code),
                                 },
                             )
                         }
@@ -321,7 +376,7 @@ pub fn run_driver(config: &Config, args: &Args) -> anyhow::Result<()> {
             ));
         }
 
-        if response.tool_calls.is_none() || response.tool_calls.as_ref().unwrap().is_empty() {
+        if tool_calls.is_empty() {
             tracing::info!("Model appears to have given up");
             break;
         }
@@ -332,7 +387,7 @@ pub fn run_driver(config: &Config, args: &Args) -> anyhow::Result<()> {
 
 #[derive(Default)]
 struct LlmOutputPrinter {
-    buffer: String,
+    buffer: Vec<char>,
 }
 
 impl LlmOutputPrinter {
@@ -344,29 +399,34 @@ impl LlmOutputPrinter {
                 self.flush();
             }
 
-            self.buffer.push_str(line);
+            self.buffer.extend(line.chars());
             self.emit_full_lines();
         }
     }
 
     fn emit_full_lines(&mut self) {
         while self.buffer.len() > Self::APPROX_MAX_LINE_WIDTH {
-            let line_break = self.buffer[..Self::APPROX_MAX_LINE_WIDTH]
-                .rfind(' ')
+            let line_break = self
+                .buffer
+                .iter()
+                .rposition(|&c| c.is_ascii_whitespace())
                 .unwrap_or(Self::APPROX_MAX_LINE_WIDTH);
-            self.flush_line(&self.buffer[..line_break + 1]);
-            self.buffer = self.buffer[line_break + 1..].to_owned();
+
+            self.flush_line(&self.buffer[..line_break]);
+            self.buffer = self.buffer[line_break + 1..].to_vec();
         }
     }
 
     pub fn flush(&mut self) {
         self.emit_full_lines();
-        self.flush_line(&self.buffer);
+        if !self.buffer.is_empty() {
+            self.flush_line(&self.buffer);
+        }
         self.buffer.clear();
     }
 
-    fn flush_line(&self, line: &str) {
-        println!("> {}", line.dimmed());
+    fn flush_line(&self, line: &[char]) {
+        println!("> {}", String::from_iter(line.iter().copied()).dimmed());
     }
 }
 
@@ -396,21 +456,33 @@ enum AssistantRole {
 }
 
 #[derive(Deserialize)]
-struct ReasoningChatCompletionResponse {
-    choices: Vec<ReasoningChatChoice>,
+struct ReasoningChatCompletionChunk {
+    #[serde(default)]
+    choices: Vec<ReasoningChatChoiceChunk>,
 }
 
 #[derive(Deserialize)]
-struct ReasoningChatChoice {
-    message: ReasoningResponseMessage,
+struct ReasoningChatChoiceChunk {
+    delta: ReasoningResponseDelta,
 }
 
 #[derive(Deserialize)]
-struct ReasoningResponseMessage {
-    #[serde(flatten)]
-    message: ChatCompletionResponseMessage,
+struct ReasoningResponseDelta {
+    #[serde(default)]
+    content: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
+    #[serde(default)]
+    refusal: Option<String>,
+}
+
+#[derive(Default)]
+struct ToolCallAccumulator {
+    id: String,
+    name: String,
+    arguments: String,
 }
 
 //
